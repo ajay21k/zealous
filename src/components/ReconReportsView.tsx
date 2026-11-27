@@ -76,9 +76,33 @@ export function ReconReportsView({
         .split(/\r?\n/)
         .map((l) => l.trim())
         .filter((l) => l && !l.toLowerCase().startsWith('date,'));
+      const parseCsvRow = (row: string): string[] => {
+        const cells: string[] = [];
+        let value = '';
+        let quoted = false;
+        for (let i = 0; i < row.length; i++) {
+          const char = row[i];
+          if (char === '"') {
+            if (quoted && row[i + 1] === '"') {
+              value += '"';
+              i++;
+            } else {
+              quoted = !quoted;
+            }
+          } else if (char === ',' && !quoted) {
+            cells.push(value.trim());
+            value = '';
+          } else {
+            value += char;
+          }
+        }
+        cells.push(value.trim());
+        return cells;
+      };
+
       const parsed = rows
         .map((row) => {
-          const cols = row.split(',').map((c) => c.trim());
+          const cols = parseCsvRow(row);
           const amount = Number(cols[3] ?? cols[1]);
           if (!Number.isFinite(amount) || amount <= 0) return null;
           return {
@@ -150,7 +174,15 @@ export function ReconReportsView({
             <Download size={14} aria-hidden="true" />
             Export JSON
           </button>
-          <button type="button" className="btn btn-sm btn-danger-outline" onClick={onResetDemo}>
+          <button
+            type="button"
+            className="btn btn-sm btn-danger-outline"
+            onClick={() => {
+              if (window.confirm('Reset all local ledger data to the original demo data? This cannot be undone.')) {
+                onResetDemo();
+              }
+            }}
+          >
             <RotateCcw size={14} aria-hidden="true" />
             Reset Demo
           </button>

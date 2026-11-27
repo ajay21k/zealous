@@ -8,6 +8,7 @@ import {
   Package,
   Receipt,
   Wifi,
+  X,
 } from 'lucide-react';
 import { InventoryView } from './components/InventoryView';
 import { KhataView } from './components/KhataView';
@@ -68,13 +69,38 @@ export function App() {
   const [profileDraft, setProfileDraft] = useState(state.profile);
 
   useEffect(() => {
-    saveBusinessState(state);
+    if (!saveBusinessState(state)) {
+      setLiveAnnouncement('Changes could not be saved locally. Storage may be full or unavailable.');
+    }
   }, [state]);
 
   useEffect(() => {
     const activeItem = NAV_ITEMS.find((i) => i.id === activeTab);
     document.title = `${activeItem?.label ?? 'Dashboard'} | VyapaarAI Whisper-Flow`;
   }, [activeTab]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavOpen(false);
+    };
+    const desktopQuery = window.matchMedia('(min-width: 961px)');
+    const handleDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) setMobileNavOpen(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    desktopQuery.addEventListener('change', handleDesktop);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+      desktopQuery.removeEventListener('change', handleDesktop);
+    };
+  }, [mobileNavOpen]);
 
   const summary = computeFinancialSummary(state);
   const currentLang = languageRegistry.getByCode(state.profile.preferredLanguage);
@@ -215,6 +241,14 @@ export function App() {
       </div>
 
       <div className="app-shell">
+        {mobileNavOpen && (
+          <button
+            type="button"
+            className="sidebar-overlay"
+            aria-label="Close navigation menu"
+            onClick={() => setMobileNavOpen(false)}
+          />
+        )}
         <aside className={`sidebar ${mobileNavOpen ? 'is-open' : ''}`}>
           <div className="brand-block">
             <div className="brand-mark" aria-hidden="true">
@@ -224,6 +258,14 @@ export function App() {
               <p className="brand-title">VyapaarAI</p>
               <p className="brand-subtitle">Whisper-Flow Business OS</p>
             </div>
+            <button
+              type="button"
+              className="sidebar-close"
+              onClick={() => setMobileNavOpen(false)}
+              aria-label="Close navigation menu"
+            >
+              <X size={18} aria-hidden="true" />
+            </button>
           </div>
 
           <nav aria-label="Primary">

@@ -27,6 +27,7 @@ import {
   processVoiceOrTextCommand,
 } from '../agents/voiceAgent';
 import { formatINR } from '../domain/formatters';
+import { answerBusinessQuery } from '../domain/businessQuery';
 import {
   BusinessState,
   ConversationTurn,
@@ -34,15 +35,31 @@ import {
   PaymentMode,
   ProposalDraft,
 } from '../domain/types';
-import { languageRegistry } from '../speech/languages';
+import { languageRegistry, resolveInteractionLanguage } from '../speech/languages';
 import {
   ActiveRecognitionSession,
   getBrowserSpeechCapabilities,
+  isEditableVoiceShortcutTarget,
+  isPushToTalkKey,
   speakReadback,
   startVoiceCapture,
   stopSpeaking,
 } from '../speech/speechProvider';
 import { ModalDialog } from './ModalDialog';
+
+type VoiceSessionState =
+  | 'idle'
+  | 'requesting_permission'
+  | 'starting'
+  | 'listening'
+  | 'stopping'
+  | 'finalizing_transcript'
+  | 'awaiting_verification'
+  | 'submitting'
+  | 'processing'
+  | 'speaking'
+  | 'awaiting_confirmation'
+  | 'error';
 
 interface WhisperFlowAgentProps {
   state: BusinessState;
@@ -98,10 +115,11 @@ export function WhisperFlowAgent({
   onToggleAutoDetect,
   onConfirmProposal,
 }: WhisperFlowAgentProps) {
-  const [listening, setListening] = useState(false);
-  const [thinking, setThinking] = useState(false);
+  const [voiceSessionState, setVoiceSessionState] = useState<VoiceSessionState>('idle');
   const [interimText, setInterimText] = useState('');
   const [inputText, setInputText] = useState('');
+  const [reviewTranscript, setReviewTranscript] = useState('');
+  const [reviewStatus, setReviewStatus] = useState<'NONE' | 'AWAITING_VERIFICATION' | 'EMPTY'>('NONE');
   const [noiseRms, setNoiseRms] = useState(0);
   const [isNoisy, setIsNoisy] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -119,12 +137,22 @@ export function WhisperFlowAgent({
 
   const sessionRef = useRef<ActiveRecognitionSession | null>(null);
   const studioRef = useRef<HTMLElement | null>(null);
+  const pttActiveRef = useRef(false);
+  const capturedTranscriptRef = useRef('');
+  const captureSessionIdRef = useRef(0);
+  const submitLockRef = useRef(false);
+  const noiseUpdateRef = useRef(0);
+  const activeQueryProductIdRef = useRef<string | undefined>(undefined);
   const langSelectId = useId();
   const cmdInputId = useId();
 
   const capabilities = getBrowserSpeechCapabilities();
   const languages = languageRegistry.list();
   const currentLang = languageRegistry.getByCode(state.profile.preferredLanguage);
+  const listening =
+    voiceSessionState === 'listening' ||
+    voiceSessionState === 'starting' ||
+    voiceSessionState === 'requesting_permission';
 
   useEffect(() => {
     let active = true;
@@ -161,7 +189,23 @@ export function WhisperFlowAgent({
     if (res.ok) {
       setFeedbackBanner({ type: 'success', text: res.message });
       appendTurn('assistant', res.message);
-      if (ttsEnabled) speakReadback(res.message, target.detectedLanguage);
+      if (ttsEnabled) {
+        setVoiceSessionState('speaking');
+        speakReadback(res.message, target.detectedLanguage, {
+          selectedApplicationLanguageCode: state.profile.preferredLanguage,
+          onEnd: () => setVoiceSessionState('idle'),
+          onError: (message) => {
+            setVoiceSessionState('idle');
+            setVoiceError(message);
+          },
+          onUnavailable: (message) => {
+            setVoiceSessionState('idle');
+            setVoiceError(message);
+          },
+        });
+      } else {
+        setVoiceSessionState('idle');
+      }
       setProposal(null);
       setInputText('');
     } else {
@@ -311,6 +355,12 @@ export function WhisperFlowAgent({
   const runCommand = async (text: string, overrideLang?: string) => {
     const clean = text.trim();
     if (!clean) return;
+    const selectedCode = overrideLang ?? state.profile.preferredLanguage;
+    const resolvedLanguage = resolveInteractionLanguage(
+      clean,
+      selectedCode,
+      state.profile.autoDetectLanguage
+    );
     setVoiceError(null);
     setFeedbackBanner(null);
     appendTurn('user', clean);
@@ -320,7 +370,7 @@ export function WhisperFlowAgent({
     if (proposal && proposal.status === 'PENDING_CONFIRMATION') {
       const decision = detectVoiceConfirmationDecision(clean);
       if (decision === 'CONFIRM') {
-        if (proposal.missingFields.length === 0 && proposal.warnings.length === 0) {
+        if (proposal.missingFields.length === 0) {
           commitActiveProposal(proposal);
         } else {
           const msg = `Still need ${proposal.missingFields.join(', ')} before confirming.`;
@@ -335,35 +385,122 @@ export function WhisperFlowAgent({
       }
     }
 
+    const deterministicQuery = answerBusinessQuery(clean, state, {
+      activeProductId: activeQueryProductIdRef.current,
+      languageCode: resolvedLanguage.code,
+    });
+    if (deterministicQuery) {
+      activeQueryProductIdRef.current =
+        deterministicQuery.productId ?? deterministicQuery.products[0]?.id;
+      const queryIntent =
+        deterministicQuery.intent === 'LOW_STOCK' ||
+        deterministicQuery.intent === 'OUT_OF_STOCK'
+          ? 'RESTOCK_ADVICE'
+          : deterministicQuery.intent === 'CUSTOMER_OUTSTANDING'
+          ? 'QUERY_RECEIVABLES'
+          : deterministicQuery.intent === 'INVENTORY_VALUE' ||
+            deterministicQuery.intent === 'INVENTORY_OVERVIEW' ||
+            deterministicQuery.intent === 'PRODUCT_COUNT'
+          ? 'QUERY_PROFIT_REPORT'
+          : 'QUERY_STOCK';
+      const localizedProp: ProposalDraft = {
+        proposalId: `prop-${Date.now().toString(36)}`,
+        intent: queryIntent,
+        routedAgents: ['Supervisor Agent', 'Inventory Agent', 'Voice Response Agent'],
+        confidence: 0.99,
+        detectedLanguage: resolvedLanguage.code,
+        languageName: resolvedLanguage.name,
+        codeSwitched: resolvedLanguage.codeSwitched,
+        originalTranscript: clean,
+        source: 'VOICE',
+        productId: deterministicQuery.productId,
+        productName: deterministicQuery.products[0]?.name,
+        missingFields: [],
+        warnings: [],
+        readbackText: deterministicQuery.answer,
+        answerText: deterministicQuery.answer,
+        status: 'ANSWERED',
+        createdAt: new Date().toISOString(),
+      };
+      setProposal(localizedProp);
+      setVoiceSessionState('idle');
+      appendTurn('assistant', localizedProp.readbackText);
+      if (ttsEnabled) {
+        setVoiceSessionState('speaking');
+        speakReadback(localizedProp.readbackText, resolvedLanguage.code, {
+          selectedApplicationLanguageCode: state.profile.preferredLanguage,
+          onEnd: () => setVoiceSessionState('idle'),
+          onUnavailable: (message) => {
+            setVoiceSessionState('idle');
+            setVoiceError(message);
+          },
+          onError: (message) => {
+            setVoiceSessionState('idle');
+            setVoiceError(message);
+          },
+        });
+      }
+      return;
+    }
+
     // Optional external AI API mode (Gemini local proxy / BYOK or OpenAI-compatible)
     if (aiConfig.mode !== 'builtin' && (aiConfig.useLocalProxy || aiConfig.apiKey.trim())) {
-      setThinking(true);
+      setVoiceSessionState('processing');
       try {
-        const llmTurn = await runExternalAiTurn(aiConfig, clean, history, proposal, state);
+        const llmTurn = await runExternalAiTurn(
+          aiConfig,
+          clean,
+          history,
+          proposal,
+          state,
+          { code: resolvedLanguage.code, autoDetect: state.profile.autoDetectLanguage }
+        );
         if (llmTurn.intent === 'CONFIRM' && proposal?.status === 'PENDING_CONFIRMATION') {
-          setThinking(false);
-          if (proposal.missingFields.length === 0 && proposal.warnings.length === 0) {
+          if (proposal.missingFields.length === 0) {
             commitActiveProposal(proposal);
           } else {
             appendTurn('assistant', llmTurn.replyInUserLanguage);
+            setVoiceSessionState('awaiting_confirmation');
           }
           return;
         }
         if (llmTurn.intent === 'REJECT' && proposal?.status === 'PENDING_CONFIRMATION') {
-          setThinking(false);
           rejectActiveProposal();
           return;
         }
         const nextProp = convertLlmTurnToProposal(llmTurn, clean);
-        setProposal(nextProp);
         if (nextProp) {
-          appendTurn('assistant', nextProp.readbackText);
-          if (ttsEnabled) speakReadback(nextProp.readbackText, nextProp.detectedLanguage);
+          const localizedProp = {
+            ...nextProp,
+            detectedLanguage: resolvedLanguage.code,
+            languageName: resolvedLanguage.name,
+            codeSwitched:
+              resolvedLanguage.codeSwitched || nextProp.codeSwitched,
+          };
+          setProposal(localizedProp);
+          if (localizedProp.status === 'PENDING_CONFIRMATION') {
+            setVoiceSessionState('awaiting_confirmation');
+          }
+          appendTurn('assistant', localizedProp.readbackText);
+          if (ttsEnabled) {
+            setVoiceSessionState('speaking');
+            speakReadback(localizedProp.readbackText, resolvedLanguage.code, {
+              selectedApplicationLanguageCode: state.profile.preferredLanguage,
+              onEnd: () => setVoiceSessionState(localizedProp.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle'),
+              onError: (message) => {
+                setVoiceSessionState(localizedProp.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+                setVoiceError(message);
+              },
+              onUnavailable: (message) => {
+                setVoiceSessionState(localizedProp.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+                setVoiceError(message);
+              },
+            });
+          }
         }
-        setThinking(false);
         return;
       } catch (err) {
-        setThinking(false);
+        setVoiceSessionState('error');
         setVoiceError(
           `${err instanceof Error ? err.message : 'AI API failed'} — falling back to built-in Whisper-Flow parser.`
         );
@@ -372,47 +509,216 @@ export function WhisperFlowAgent({
 
     // Built-in deterministic multi-turn conversational parser
     const nextProposal = processVoiceOrTextCommand(clean, state, {
-      preferredLangCode: overrideLang ?? state.profile.preferredLanguage,
+      preferredLangCode: resolvedLanguage.code,
+      autoDetectLanguage: false,
       activeProposal: proposal,
+      activeQueryProductId: activeQueryProductIdRef.current,
     });
-    setProposal(nextProposal);
-    appendTurn('assistant', nextProposal.readbackText);
+    const localizedProposal = {
+      ...nextProposal,
+      detectedLanguage: resolvedLanguage.code,
+      languageName: resolvedLanguage.name,
+      codeSwitched: resolvedLanguage.codeSwitched || nextProposal.codeSwitched,
+    };
+    setProposal(localizedProposal);
+    if (localizedProposal.status === 'PENDING_CONFIRMATION') {
+      setVoiceSessionState('awaiting_confirmation');
+    } else {
+      setVoiceSessionState('idle');
+    }
+    appendTurn('assistant', localizedProposal.readbackText);
     if (ttsEnabled) {
-      speakReadback(nextProposal.readbackText, nextProposal.detectedLanguage);
+      setVoiceSessionState('speaking');
+      speakReadback(localizedProposal.readbackText, resolvedLanguage.code, {
+        selectedApplicationLanguageCode: state.profile.preferredLanguage,
+        onEnd: () => setVoiceSessionState(localizedProposal.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle'),
+        onError: (message) => {
+          setVoiceSessionState(localizedProposal.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+          setVoiceError(message);
+        },
+        onUnavailable: (message) => {
+          setVoiceSessionState(localizedProposal.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+          setVoiceError(message);
+        },
+      });
+    }
+  };
+
+  const finalizeCapture = () => {
+    if (
+      voiceSessionState !== 'listening' &&
+      voiceSessionState !== 'starting' &&
+      voiceSessionState !== 'requesting_permission'
+    ) {
+      return;
+    }
+    setVoiceSessionState('stopping');
+    setInterimText('');
+    sessionRef.current?.stop();
+  };
+
+  const submitVerifiedTranscript = async () => {
+    const verified = reviewTranscript.trim();
+    if (!verified || submitLockRef.current) return;
+    submitLockRef.current = true;
+    setVoiceSessionState('submitting');
+    try {
+      await runCommand(verified);
+    } finally {
+      submitLockRef.current = false;
+      setReviewStatus('NONE');
+      setReviewTranscript('');
+    }
+  };
+
+  const submitTypedText = async () => {
+    const text = inputText.trim();
+    if (!text || submitLockRef.current) return;
+    submitLockRef.current = true;
+    setVoiceSessionState('submitting');
+    try {
+      await runCommand(text);
+    } finally {
+      submitLockRef.current = false;
+      setInputText('');
     }
   };
 
   const toggleMicrophone = () => {
     if (listening) {
-      sessionRef.current?.stop();
-      sessionRef.current = null;
-      setListening(false);
-      setNoiseRms(0);
+      finalizeCapture();
+      return;
+    }
+    if (sessionRef.current) return;
+
+    const resolvedLanguage = resolveInteractionLanguage(
+      '',
+      state.profile.preferredLanguage,
+      state.profile.autoDetectLanguage
+    );
+    if (!resolvedLanguage.browserRecognitionSupported) {
+      setVoiceSessionState('error');
+      setVoiceError(
+        `${resolvedLanguage.name} live browser recognition is not supported by this browser. Written input remains available.`
+      );
       return;
     }
 
     setVoiceError(null);
     setInterimText('');
-    setListening(true);
+    setVoiceSessionState('requesting_permission');
+    capturedTranscriptRef.current = '';
+    const sessionId = ++captureSessionIdRef.current;
 
-    sessionRef.current = startVoiceCapture(state.profile.preferredLanguage, {
+    const recognitionCode = resolvedLanguage.recognitionCode;
+    sessionRef.current = startVoiceCapture(recognitionCode, {
       onInterim: (text) => setInterimText(text),
-      onFinal: (text) => {
+      onStart: () => {
+        if (captureSessionIdRef.current !== sessionId) return;
+        setVoiceSessionState('starting');
+      },
+      onFinal: (text, _confidence) => {
+        if (captureSessionIdRef.current !== sessionId) return;
         setInterimText('');
-        void runCommand(text);
+        capturedTranscriptRef.current =
+          `${capturedTranscriptRef.current} ${text}`.trim();
       },
       onNoiseLevel: (rms, noisy) => {
-        setNoiseRms(rms);
+        const now = Date.now();
+        if (now - noiseUpdateRef.current < 120) return;
+        noiseUpdateRef.current = now;
+        setNoiseRms((current) =>
+          Math.abs(current - rms) < 0.03 ? current : rms
+        );
         setIsNoisy(noisy);
       },
-      onError: (msg) => setVoiceError(msg),
-      onEnd: () => {
-        setListening(false);
+      onAborted: (message) => {
+        if (captureSessionIdRef.current !== sessionId) return;
+        setVoiceSessionState('error');
+        setVoiceError(message);
+      },
+      onFinalized: (text) => {
+        if (captureSessionIdRef.current !== sessionId) return;
+        const complete =
+          text.trim() || capturedTranscriptRef.current.trim();
+        setInterimText('');
         setNoiseRms(0);
+        setIsNoisy(false);
+        if (complete) {
+          setReviewTranscript(complete);
+          setReviewStatus('AWAITING_VERIFICATION');
+        } else {
+          setReviewTranscript('');
+          setReviewStatus('EMPTY');
+        }
+        setVoiceSessionState('awaiting_verification');
         sessionRef.current = null;
       },
+      onError: (msg) => {
+        setVoiceSessionState('error');
+        setVoiceError(msg);
+      },
+      onEnd: () => {
+        if (captureSessionIdRef.current !== sessionId) return;
+        setNoiseRms(0);
+        setIsNoisy(false);
+        sessionRef.current = null;
+      },
+      onUnexpectedEnd: (message) => {
+        setVoiceError(message);
+        setVoiceSessionState('listening');
+      },
+      onMaxDuration: (message) => {
+        setVoiceSessionState('idle');
+        setVoiceError(message);
+      },
     });
+    setVoiceSessionState('listening');
   };
+
+  useEffect(() => {
+    const isEditable = (target: EventTarget | null) =>
+      target instanceof HTMLElement &&
+      isEditableVoiceShortcutTarget(target.tagName, target.isContentEditable);
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        !isPushToTalkKey(event.key, event.ctrlKey, event.altKey, event.metaKey) ||
+        isEditable(event.target) ||
+        event.repeat
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (!pttActiveRef.current && !sessionRef.current) {
+        pttActiveRef.current = true;
+        toggleMicrophone();
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== 'q') return;
+      if (!pttActiveRef.current) return;
+      event.preventDefault();
+      pttActiveRef.current = false;
+      finalizeCapture();
+    };
+
+    const handleBlur = () => {
+      if (!pttActiveRef.current) return;
+      pttActiveRef.current = false;
+      finalizeCapture();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [listening]);
 
   const updateProposalField = (patch: Partial<ProposalDraft>) => {
     if (!proposal) return;
@@ -554,12 +860,16 @@ export function WhisperFlowAgent({
             <select
               id={langSelectId}
               value={state.profile.preferredLanguage}
-              onChange={(e) => onChangeLanguage(e.target.value)}
+              onChange={(e) => {
+                if (listening) finalizeCapture();
+                onChangeLanguage(e.target.value);
+              }}
               style={{ width: 'auto', minWidth: '170px', minBlockSize: '40px' }}
             >
               {languages.map((l) => (
                 <option key={l.code} value={l.code}>
-                  {l.name} ({l.nativeName}){!l.nluPrototypeSupported ? ' [Adapter]' : ''}
+                  {l.name} ({l.nativeName}){!l.nluPrototypeSupported ? ' [Adapter required]' : ''}
+                  {!l.browserSttSupported ? ' [No browser STT configured]' : ''}
                 </option>
               ))}
             </select>
@@ -586,6 +896,10 @@ export function WhisperFlowAgent({
           </div>
         </div>
 
+        <p className="text-muted" role="note">
+          Browser speech recognition and installed playback voices vary by device. Language entries indicate prototype eligibility only; each capability is checked when used.
+        </p>
+
         {currentLang && !currentLang.nluPrototypeSupported && aiConfig.mode === 'builtin' && !aiConfig.useLocalProxy && (
           <div className="alert-banner alert-warn" role="status">
             <AlertCircle size={16} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
@@ -608,7 +922,7 @@ export function WhisperFlowAgent({
                 {turn.text}
               </div>
             ))}
-            {thinking && (
+            {voiceSessionState === 'processing' && (
               <div className="wf-bubble is-assistant" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
                 <Loader2 size={14} aria-hidden="true" />
                 <span>Thinking…</span>
@@ -621,7 +935,7 @@ export function WhisperFlowAgent({
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            void runCommand(inputText);
+            void submitTypedText();
           }}
           style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center' }}
         >
@@ -630,6 +944,7 @@ export function WhisperFlowAgent({
             className={`btn ${listening ? 'btn-danger-outline' : 'btn-primary'}`}
             onClick={toggleMicrophone}
             style={{ minBlockSize: '46px', paddingInline: '1.1rem' }}
+            title="Click to toggle listening. Desktop shortcut: hold Q."
           >
             {listening ? <MicOff size={18} aria-hidden="true" /> : <Mic size={18} aria-hidden="true" />}
             {listening ? 'Stop Mic' : 'Tap to Speak'}
@@ -641,7 +956,7 @@ export function WhisperFlowAgent({
           <input
             id={cmdInputId}
             type="text"
-            value={listening && interimText ? interimText : inputText}
+            value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && e.nativeEvent.isComposing) e.preventDefault();
@@ -656,7 +971,16 @@ export function WhisperFlowAgent({
             style={{ flex: '1 1 280px', minBlockSize: '46px' }}
           />
 
-          <button type="submit" disabled={thinking} className="btn btn-soft-blue" style={{ minBlockSize: '46px' }}>
+          <button
+            type="submit"
+            disabled={
+              voiceSessionState === 'processing' ||
+              voiceSessionState === 'submitting' ||
+              submitLockRef.current
+            }
+            className="btn btn-soft-blue"
+            style={{ minBlockSize: '46px' }}
+          >
             <Send size={16} aria-hidden="true" />
             Send
           </button>
@@ -666,15 +990,117 @@ export function WhisperFlowAgent({
               type="button"
               className="btn btn-secondary btn-sm"
               onClick={() => {
+                stopSpeaking();
                 setHistory([]);
                 setProposal(null);
                 setFeedbackBanner(null);
+                setVoiceSessionState(listening ? 'listening' : 'idle');
               }}
             >
               Clear Chat
             </button>
           )}
         </form>
+
+        {listening && interimText && (
+          <div className="interim-transcript" aria-live="polite">
+            <span>Recognizing:</span> {interimText}
+          </div>
+        )}
+
+        <div className="voice-state-row" role="status" aria-live="polite">
+          <span className={`voice-state-dot is-${voiceSessionState}`} aria-hidden="true" />
+          <span>
+            {voiceSessionState === 'idle' && 'Idle'}
+            {voiceSessionState === 'requesting_permission' && 'Requesting microphone permission'}
+            {voiceSessionState === 'starting' && 'Starting microphone'}
+            {voiceSessionState === 'listening' && 'Listening — pauses do not end the session'}
+            {voiceSessionState === 'stopping' && 'Stopping capture'}
+            {voiceSessionState === 'finalizing_transcript' && 'Finalizing transcript'}
+            {voiceSessionState === 'awaiting_verification' && 'Awaiting transcript verification'}
+            {voiceSessionState === 'submitting' && 'Submitting verified transcript'}
+            {voiceSessionState === 'processing' && 'Processing transcript'}
+            {voiceSessionState === 'speaking' && 'Speaking response'}
+            {voiceSessionState === 'awaiting_confirmation' && 'Awaiting confirmation'}
+            {voiceSessionState === 'error' && 'Voice session needs attention'}
+          </span>
+          {voiceSessionState === 'speaking' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-secondary"
+              onClick={() => {
+                stopSpeaking();
+                setVoiceSessionState(proposal?.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+              }}
+            >
+              <VolumeX size={14} aria-hidden="true" />
+              Stop speech
+            </button>
+          )}
+          <span className="shortcut-hint">Desktop: hold Q to talk</span>
+        </div>
+
+        {reviewStatus !== 'NONE' && (
+          <section
+            className="transcript-review"
+            aria-labelledby="transcript-review-title"
+          >
+            <div className="transcript-review-header">
+              <div>
+                <strong id="transcript-review-title">Transcript verification</strong>
+                <div className="field-hint">
+                  {reviewStatus === 'EMPTY'
+                    ? 'No usable speech was recognized.'
+                    : 'Awaiting verification'}
+                </div>
+              </div>
+              {reviewStatus === 'AWAITING_VERIFICATION' && (
+                <span className="badge badge-warn">Not sent to AI</span>
+              )}
+            </div>
+            {reviewStatus === 'AWAITING_VERIFICATION' ? (
+              <textarea
+                aria-label="Recognized transcript to review"
+                value={reviewTranscript}
+                onChange={(e) => setReviewTranscript(e.target.value)}
+                rows={3}
+              />
+            ) : (
+              <div className="alert-banner alert-warn">
+                <AlertCircle size={16} aria-hidden="true" />
+                <span>No usable transcript was captured. Speak again or type a message below.</span>
+              </div>
+            )}
+            <div className="transcript-review-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setReviewStatus('NONE');
+                  setReviewTranscript('');
+                  setVoiceSessionState('idle');
+                }}
+              >
+                Discard
+              </button>
+              {reviewStatus === 'AWAITING_VERIFICATION' && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={
+                    !reviewTranscript.trim() ||
+                    submitLockRef.current ||
+                    voiceSessionState === 'submitting'
+                  }
+                  onClick={() => void submitVerifiedTranscript()}
+                >
+                  <Send size={16} aria-hidden="true" />
+                  Send
+                </button>
+              )}
+            </div>
+          </section>
+        )}
 
         {/* Quick Flow Presets */}
         <div className="chip-row" aria-label="Sample multilingual voice commands">
@@ -740,7 +1166,21 @@ export function WhisperFlowAgent({
                   type="button"
                   className="btn btn-sm btn-soft-blue"
                   style={{ marginTop: '0.45rem' }}
-                  onClick={() => speakReadback(proposal.readbackText, proposal.detectedLanguage)}
+                  onClick={() => {
+                    setVoiceSessionState('speaking');
+                    speakReadback(proposal.readbackText, proposal.detectedLanguage, {
+                      selectedApplicationLanguageCode: state.profile.preferredLanguage,
+                      onEnd: () => setVoiceSessionState(proposal.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle'),
+                      onError: (message) => {
+                        setVoiceSessionState(proposal.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+                        setVoiceError(message);
+                      },
+                      onUnavailable: (message) => {
+                        setVoiceSessionState(proposal.status === 'PENDING_CONFIRMATION' ? 'awaiting_confirmation' : 'idle');
+                        setVoiceError(message);
+                      },
+                    });
+                  }}
                 >
                   <Volume2 size={14} aria-hidden="true" />
                   Replay Readback
@@ -774,7 +1214,21 @@ export function WhisperFlowAgent({
                         next.readbackText = buildLocalizedReadback(next);
                         setProposal(next);
                         appendTurn('assistant', next.readbackText);
-                        if (ttsEnabled) speakReadback(next.readbackText, next.detectedLanguage);
+                        if (ttsEnabled) {
+                          setVoiceSessionState('speaking');
+                          speakReadback(next.readbackText, next.detectedLanguage, {
+                            selectedApplicationLanguageCode: state.profile.preferredLanguage,
+                            onEnd: () => setVoiceSessionState('awaiting_confirmation'),
+                            onUnavailable: (message) => {
+                              setVoiceSessionState('awaiting_confirmation');
+                              setVoiceError(message);
+                            },
+                            onError: (message) => {
+                              setVoiceSessionState('awaiting_confirmation');
+                              setVoiceError(message);
+                            },
+                          });
+                        }
                       }}
                     >
                       {cand.name} (Stock: {cand.currentStock} {cand.unit} · Ref ₹{cand.defaultSellPrice})

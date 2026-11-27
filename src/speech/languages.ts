@@ -3,8 +3,10 @@ export interface LanguageConfig {
   name: string;
   nativeName: string;
   scriptRange?: RegExp;
+  // These are registry eligibility hints, not guarantees about a browser/device.
   browserSttSupported: boolean;
   nluPrototypeSupported: boolean;
+  // Only map to a locale for the same language. Tanglish uses Tamil when text is in Tamil script.
   ttsLangCode: string;
   regionHint: string;
   /** Examples of colloquial/code-switched keywords for auto-detection */
@@ -133,6 +135,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     code: 'as-IN',
     name: 'Assamese',
     nativeName: 'অসমীয়া',
+    scriptRange: /[\u0980-\u09FF]/,
     browserSttSupported: false,
     nluPrototypeSupported: true,
     ttsLangCode: 'as-IN',
@@ -154,16 +157,17 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     nativeName: 'कोंकणी',
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'hi-IN',
+    ttsLangCode: 'kok-IN',
     regionHint: 'Goa & Coastal Karnataka (Provider adapter required)',
   },
   {
     code: 'ks-IN',
     name: 'Kashmiri',
     nativeName: 'कॉशुर / کٲشُر',
+    scriptRange: /[\u0600-\u06FF]/,
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'ur-IN',
+    ttsLangCode: 'ks-IN',
     regionHint: 'Jammu & Kashmir (Provider adapter required)',
   },
   {
@@ -172,7 +176,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     nativeName: 'संस्कृतम्',
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'hi-IN',
+    ttsLangCode: 'sa-IN',
     regionHint: 'Classical (Provider adapter required)',
   },
   {
@@ -182,7 +186,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     scriptRange: /[\uABC0-\uABFF]/,
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'en-IN',
+    ttsLangCode: 'mni-IN',
     regionHint: 'Manipur (Provider adapter required)',
   },
   {
@@ -191,7 +195,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     nativeName: 'बड़ो',
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'hi-IN',
+    ttsLangCode: 'brx-IN',
     regionHint: 'Assam BTR (Provider adapter required)',
   },
   {
@@ -200,7 +204,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     nativeName: 'डोगरी',
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'hi-IN',
+    ttsLangCode: 'doi-IN',
     regionHint: 'Jammu (Provider adapter required)',
   },
   {
@@ -209,7 +213,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     nativeName: 'मैथिली',
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'hi-IN',
+    ttsLangCode: 'mai-IN',
     regionHint: 'Bihar & Mithila (Provider adapter required)',
   },
   {
@@ -219,7 +223,7 @@ const DEFAULT_LANGUAGES: LanguageConfig[] = [
     scriptRange: /[\u1C50-\u1C7F]/,
     browserSttSupported: false,
     nluPrototypeSupported: false,
-    ttsLangCode: 'en-IN',
+    ttsLangCode: 'sat-IN',
     regionHint: 'Jharkhand, Odisha & Bengal (Provider adapter required)',
   },
 ];
@@ -273,6 +277,24 @@ export function detectLanguageFromText(
           };
         }
       }
+      if (lang.code === 'bn-IN' && preferredCode === 'as-IN') {
+        const preferred = languageRegistry.getByCode(preferredCode)!;
+        return {
+          code: preferred.code,
+          name: preferred.name,
+          codeSwitched: hasLatin,
+          dialectNote: hasLatin ? `${preferred.name} + English code-switch` : undefined,
+        };
+      }
+      if (lang.code === 'ur-IN' && preferredCode === 'ks-IN') {
+        const preferred = languageRegistry.getByCode(preferredCode)!;
+        return {
+          code: preferred.code,
+          name: preferred.name,
+          codeSwitched: hasLatin,
+          dialectNote: hasLatin ? `${preferred.name} + English code-switch` : undefined,
+        };
+      }
       return {
         code: lang.code,
         name: lang.name,
@@ -298,7 +320,18 @@ export function detectLanguageFromText(
     }
   }
 
-  // 3. Fallback to preferred language or Indian English
+  // 3. Unambiguous Latin-only input stays English. The preferred Indian locale
+  // is used only for explicit scripted input or recognized regional cues.
+  if (hasLatin) {
+    const english = languageRegistry.getByCode('en-IN')!;
+    return {
+      code: english.code,
+      name: english.name,
+      codeSwitched: false,
+    };
+  }
+
+  // 4. Scriptless/romanized text with no cues falls back to the selected locale.
   const pref = languageRegistry.getByCode(preferredCode);
   if (pref && pref.code !== 'en-IN') {
     return {
@@ -312,5 +345,47 @@ export function detectLanguageFromText(
     code: 'en-IN',
     name: 'English (India)',
     codeSwitched: false,
+  };
+}
+
+export interface ResolvedInteractionLanguage {
+  code: string;
+  name: string;
+  nativeName: string;
+  recognitionCode: string;
+  ttsCode: string;
+  codeSwitched: boolean;
+  autoDetected: boolean;
+  browserRecognitionSupported: boolean;
+}
+
+export function resolveInteractionLanguage(
+  inputText: string,
+  selectedCode: string,
+  autoDetect: boolean
+): ResolvedInteractionLanguage {
+  const selected =
+    languageRegistry.getByCode(selectedCode) ??
+    languageRegistry.getByCode('en-IN')!;
+  const detection = autoDetect
+    ? detectLanguageFromText(inputText, selectedCode)
+    : {
+        code: selected.code,
+        name: selected.name,
+        codeSwitched: false,
+      };
+  const resolved =
+    languageRegistry.getByCode(detection.code) ??
+    languageRegistry.getByCode('en-IN')!;
+
+  return {
+    code: resolved.code,
+    name: resolved.name,
+    nativeName: resolved.nativeName,
+    recognitionCode: resolved.browserSttSupported ? resolved.code : 'unsupported',
+    ttsCode: resolved.ttsLangCode,
+    codeSwitched: detection.codeSwitched,
+    autoDetected: autoDetect,
+    browserRecognitionSupported: resolved.browserSttSupported,
   };
 }

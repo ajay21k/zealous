@@ -53,6 +53,21 @@ html {
 body {
   margin: 0;
   min-block-size: 100dvh;
+  overflow-x: hidden;
+}
+
+#root {
+  min-inline-size: 320px;
+  inline-size: 100%;
+  overflow-x: clip;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
 }
 
 /* Accessibility utilities */
@@ -137,6 +152,24 @@ body {
   font-size: 0.75rem;
   color: var(--ink-muted);
   margin: 0.15rem 0 0;
+}
+
+.sidebar-close {
+  display: none;
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  margin-inline-start: auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--ink-primary);
+  cursor: pointer;
+}
+
+.sidebar-overlay {
+  display: none;
 }
 
 .nav-list {
@@ -1048,6 +1081,101 @@ dialog.app-dialog::backdrop {
   flex-wrap: wrap;
 }
 
+.voice-state-row {
+  min-block-size: 36px;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: var(--ink-secondary);
+}
+
+.voice-state-dot {
+  inline-size: 9px;
+  block-size: 9px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  flex-shrink: 0;
+}
+
+.voice-state-dot.is-listening,
+.voice-state-dot.is-requesting_permission,
+.voice-state-dot.is-processing,
+.voice-state-dot.is-starting,
+.voice-state-dot.is-stopping,
+.voice-state-dot.is-finalizing_transcript,
+.voice-state-dot.is-submitting,
+.voice-state-dot.is-speaking {
+  background: var(--brand-primary);
+  box-shadow: 0 0 0 4px var(--bg-blue-tint);
+}
+
+.voice-state-dot.is-awaiting_confirmation {
+  background: var(--warn-text);
+  box-shadow: 0 0 0 4px var(--warn-bg);
+}
+
+.voice-state-dot.is-awaiting_verification {
+  background: var(--warn-text);
+  box-shadow: 0 0 0 4px var(--warn-bg);
+}
+
+.voice-state-dot.is-error {
+  background: var(--danger-text);
+  box-shadow: 0 0 0 4px var(--danger-bg);
+}
+
+.interim-transcript {
+  border-inline-start: 3px solid var(--brand-primary);
+  background: var(--bg-blue-tint);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 0.55rem 0.7rem;
+  color: var(--ink-secondary);
+  font-size: 0.82rem;
+}
+
+.interim-transcript span,
+.shortcut-hint {
+  color: var(--ink-muted);
+  font-weight: 600;
+}
+
+.transcript-review {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+}
+
+.transcript-review-header,
+.transcript-review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.transcript-review textarea {
+  background: var(--bg-surface);
+}
+
+.shortcut-hint {
+  margin-inline-start: auto;
+  font-size: 0.72rem;
+}
+
+.tx-line-grid {
+  display: grid;
+  grid-template-columns: 2fr 0.9fr 0.8fr 1fr auto;
+  gap: 0.45rem;
+  align-items: end;
+}
+
 .wf-chat-log {
   display: flex;
   flex-direction: column;
@@ -1102,20 +1230,177 @@ dialog.app-dialog::backdrop {
     transform: translateX(0);
   }
 
+  .sidebar-close {
+    display: inline-flex;
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    border: 0;
+    padding: 0;
+    background: rgb(15 23 42 / 0.42);
+  }
+
   .mobile-menu-btn {
     display: inline-flex;
   }
 
   .two-col-grid,
-  .three-col-grid,
   .form-row-2 {
     grid-template-columns: 1fr;
+  }
+
+  .three-col-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .voice-panel {
     inset-inline-end: 0.75rem;
     inset-inline-start: 0.75rem;
     inline-size: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .top-header {
+    padding-inline: 0.75rem;
+    flex-wrap: nowrap;
+  }
+
+  .header-actions {
+    flex: 0 0 auto;
+  }
+
+  .header-actions .badge {
+    display: none;
+  }
+
+  .shop-meta {
+    max-inline-size: 46vw;
+  }
+
+  .shop-meta h2,
+  .shop-meta p {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .main-content {
+    padding-inline: 0.75rem;
+    padding-block-end: calc(5.5rem + env(safe-area-inset-bottom));
+  }
+
+  .page-header {
+    align-items: stretch;
+  }
+
+  .page-header .toolbar-group,
+  .page-header .header-actions {
+    width: 100%;
+  }
+
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .three-col-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .card {
+    padding-inline: 0.85rem;
+  }
+
+  .bar-row {
+    grid-template-columns: 110px minmax(0, 1fr) 78px;
+  }
+
+  .form-row-2 {
+    grid-template-columns: 1fr;
+  }
+
+  dialog.app-dialog,
+  dialog.app-dialog.dialog-wide {
+    inline-size: calc(100dvw - 1rem);
+    max-block-size: calc(100dvh - 1rem);
+  }
+
+  dialog.app-dialog {
+    margin-block: 0.5rem;
+  }
+
+  .dialog-body {
+    max-block-size: calc(100dvh - 5.5rem);
+  }
+
+  .dialog-footer {
+    flex-wrap: wrap;
+  }
+
+  .dialog-footer .btn {
+    flex: 1 1 8rem;
+  }
+
+  .voice-fab-wrap {
+    inset-inline-end: 0.75rem;
+    inset-block-end: calc(0.75rem + env(safe-area-inset-bottom));
+  }
+
+  .voice-fab {
+    min-block-size: 50px;
+  }
+
+  .voice-panel {
+    inset-inline: 0.5rem;
+    inset-block-end: calc(4.75rem + env(safe-area-inset-bottom));
+    max-block-size: calc(72dvh - env(safe-area-inset-bottom));
+  }
+
+  .tx-line-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tx-line-grid .field:first-child,
+  .tx-line-grid .btn-danger-outline {
+    grid-column: 1 / -1;
+  }
+
+  .chip-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-block-end: 0.25rem;
+  }
+
+  .chip-btn {
+    flex: 0 0 auto;
+    min-block-size: 44px;
+  }
+}
+
+@media (max-width: 380px) {
+  .three-col-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .shop-meta {
+    max-inline-size: 40vw;
+  }
+
+  .header-actions .btn {
+    min-inline-size: 44px;
+    padding-inline: 0.55rem;
+  }
+
+  .bar-row {
+    grid-template-columns: 82px minmax(0, 1fr) 64px;
   }
 }
 

@@ -5,6 +5,7 @@ import {
   detectVoiceConfirmationDecision,
   processVoiceOrTextCommand,
 } from './voiceAgent';
+import { resolveInteractionLanguage } from '../speech/languages';
 
 describe('voiceAgent multilingual extraction & safeguards', () => {
   const state = createInitialBusinessState();
@@ -95,7 +96,7 @@ describe('voiceAgent multilingual extraction & safeguards', () => {
   });
 
   it('offers respectful fallback when an unconfigured scheduled language is selected', () => {
-    const fallback = processVoiceOrTextCommand('50 rice sold', state, {
+    const fallback = processVoiceOrTextCommand('᱕᱐ rice sold', state, {
       preferredLangCode: 'sat-IN',
     });
     expect(fallback.intent).toBe('UNSUPPORTED_LANGUAGE');
@@ -193,5 +194,41 @@ describe('voiceAgent multilingual extraction & safeguards', () => {
     expect(pur.quantity).toBe(20);
     expect(pur.unitPrice).toBe(180);
     expect(pur.missingFields).toEqual([]);
+  });
+
+  it('keeps English input and output English even when Tamil is selected', () => {
+    const resolved = resolveInteractionLanguage(
+      'Sold 5 bags of rice for 6000',
+      'ta-IN',
+      true
+    );
+    expect(resolved.code).toBe('en-IN');
+    expect(resolved.ttsCode).toBe('en-IN');
+  });
+
+  it('uses selected Tamil locale when auto-detect is off', () => {
+    const resolved = resolveInteractionLanguage(
+      '5 bags rice',
+      'ta-IN',
+      false
+    );
+    expect(resolved.code).toBe('ta-IN');
+    expect(resolved.recognitionCode).toBe('ta-IN');
+    expect(resolved.ttsCode).toBe('ta-IN');
+  });
+
+  it('detects Tanglish input and preserves a mixed-language response locale', () => {
+    const resolved = resolveInteractionLanguage(
+      '5 packs nei sell panninen',
+      'en-IN',
+      true
+    );
+    expect(resolved.code).toBe('ta-IN');
+    expect(resolved.codeSwitched).toBe(true);
+  });
+
+  it('uses the selected locale to disambiguate shared Assamese and Kashmiri scripts', () => {
+    expect(resolveInteractionLanguage('চাউল কিমান আছে?', 'as-IN', true).code).toBe('as-IN');
+    expect(resolveInteractionLanguage('چاول کتنا ہے؟', 'ks-IN', true).code).toBe('ks-IN');
   });
 });

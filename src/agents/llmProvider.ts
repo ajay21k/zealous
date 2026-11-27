@@ -7,6 +7,7 @@ import {
   PaymentMode,
   ProposalDraft,
 } from '../domain/types';
+import { detectLanguageFromText, languageRegistry } from '../speech/languages';
 
 export type AiBrainMode = 'builtin' | 'gemini' | 'openai-compatible';
 
@@ -100,7 +101,12 @@ export interface LlmStructuredTurn {
   detectedLanguageCode?: string;
 }
 
-function buildSystemInstruction(state: BusinessState, preferredLang: string): string {
+function buildSystemInstruction(
+  state: BusinessState,
+  preferredLang: string,
+  interactionLangCode: string,
+  autoDetect: boolean
+): string {
   const summary = computeFinancialSummary(state);
   const products = state.products.map((p) => ({
     id: p.id,
@@ -137,8 +143,19 @@ function buildSystemInstruction(state: BusinessState, preferredLang: string): st
       })),
   };
 
+  const interactionLang =
+    languageRegistry.getByCode(interactionLangCode)?.name ??
+    preferredLang;
   return `You are VyapaarAI Whisper-Flow, a multilingual Indian business & accounting voice assistant.
-Preferred language: ${preferredLang}. Respond naturally in the same language/script the user speaks (or preferred language). Keep replyInUserLanguage concise and suitable for voice TTS readback.
+INTERACTION LANGUAGE POLICY:
+- Interaction language code: ${interactionLangCode}
+- Interaction language name: ${interactionLang}
+- Auto-detect enabled: ${autoDetect ? 'yes' : 'no'}
+- Generate replyInUserLanguage exclusively in ${interactionLang}. Do not switch languages.
+- Treat conversation history only as business context; never copy a previous turn's language when it differs from the current interaction language.
+- For auto-detected English input, use English. For mixed code-switched input, preserve the user's business terms and answer in the detected interaction language.
+- Do not translate product names, customer names, supplier names, or transaction identifiers.
+Keep replyInUserLanguage concise and suitable for voice TTS readback.
 
 INVENTORY CATALOGUE:
 ${JSON.stringify(products)}
@@ -183,18 +200,72 @@ RULES:
 }`;
 }
 
+function parseLlmTurn(raw: string, interactionLanguageCode: string): LlmStructuredTurn {
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('AI returned an invalid structured response.');
+  }
+  const result = parsed as Record<string, unknown>;
+  const validIntents: LlmStructuredTurn['intent'][] = [
+    'RECORD_SALE',
+    'RECORD_PURCHASE',
+    'RECORD_CUSTOMER_PAYMENT',
+    'RECORD_EXPENSE',
+    'QUERY',
+    'CONFIRM',
+    'REJECT',
+    'CLARIFY',
+  ];
+  if (
+    typeof result.intent !== 'string' ||
+    !validIntents.includes(result.intent as LlmStructuredTurn['intent']) ||
+    typeof result.replyInUserLanguage !== 'string' ||
+    !result.replyInUserLanguage.trim()
+  ) {
+    throw new Error('AI returned an incomplete structured response.');
+  }
+
+  const language = languageRegistry.getByCode(interactionLanguageCode);
+  const reply = result.replyInUserLanguage;
+  if (language?.scriptRange) {
+    const usesAnyIndicScript =
+      /[\u0600-\u0DFF\u1C50-\u1C7F\uABC0-\uABFF]/u.test(reply);
+    const matchesSelectedScript = language.scriptRange.test(reply);
+    const romanizedLanguage = detectLanguageFromText(reply, interactionLanguageCode);
+    if (
+      (usesAnyIndicScript && !matchesSelectedScript) ||
+      (!usesAnyIndicScript && romanizedLanguage.code !== interactionLanguageCode)
+    ) {
+      throw new Error(`AI response did not follow the selected ${language.name} language.`);
+    }
+  }
+
+  return {
+    ...result,
+    intent: result.intent as LlmStructuredTurn['intent'],
+    replyInUserLanguage: reply,
+    detectedLanguageCode: interactionLanguageCode,
+  } as LlmStructuredTurn;
+}
+
 export async function runExternalAiTurn(
   config: AiApiConfig,
   userMessage: string,
   history: ConversationTurn[],
   activeProposal: ProposalDraft | null,
-  state: BusinessState
+  state: BusinessState,
+  interactionLanguage?: { code: string; autoDetect: boolean }
 ): Promise<LlmStructuredTurn> {
   if (!config.useLocalProxy && !config.apiKey.trim()) {
     throw new Error('No API key configured.');
   }
 
-  const systemPrompt = buildSystemInstruction(state, state.profile.preferredLanguage);
+  const systemPrompt = buildSystemInstruction(
+    state,
+    state.profile.preferredLanguage,
+    interactionLanguage?.code ?? state.profile.preferredLanguage,
+    interactionLanguage?.autoDetect ?? state.profile.autoDetectLanguage
+  );
   const contextNote = activeProposal
     ? `\nCurrent pending draft: ${JSON.stringify({
         intent: activeProposal.intent,
@@ -267,7 +338,7 @@ export async function runExternalAiTurn(
       candidates?: { content?: { parts?: { text?: string }[] } }[];
     };
     const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    return JSON.parse(rawJson) as LlmStructuredTurn;
+    return parseLlmTurn(rawJson, interactionLanguage?.code ?? state.profile.preferredLanguage);
   }
 
   // OpenAI-compatible (OpenAI, Groq, Together, OpenRouter, local Ollama)
@@ -303,5 +374,5 @@ export async function runExternalAiTurn(
     choices?: { message?: { content?: string } }[];
   };
   const rawJson = data.choices?.[0]?.message?.content ?? '';
-  return JSON.parse(rawJson) as LlmStructuredTurn;
+  return parseLlmTurn(rawJson, interactionLanguage?.code ?? state.profile.preferredLanguage);
 }

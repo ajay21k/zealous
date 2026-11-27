@@ -1,5 +1,6 @@
 import { formatINR } from '../domain/formatters';
 import { computeFinancialSummary } from '../domain/ledgerEngine';
+import { answerBusinessQuery } from '../domain/businessQuery';
 import {
   BusinessState,
   Customer,
@@ -515,12 +516,17 @@ export function applyFieldCorrectionToProposal(
 export function processVoiceOrTextCommand(
   rawText: string,
   state: BusinessState,
-  options?: { preferredLangCode?: string; activeProposal?: ProposalDraft | null }
+  options?: {
+    preferredLangCode?: string;
+    autoDetectLanguage?: boolean;
+    activeProposal?: ProposalDraft | null;
+    activeQueryProductId?: string;
+  }
 ): ProposalDraft {
   const text = rawText.trim();
   const preferredCode = options?.preferredLangCode ?? state.profile.preferredLanguage;
   const preferredLangConfig = languageRegistry.getByCode(preferredCode);
-  const detected = state.profile.autoDetectLanguage
+  const detected = (options?.autoDetectLanguage ?? state.profile.autoDetectLanguage)
     ? detectLanguageFromText(text, preferredCode)
     : {
         code: preferredCode,
@@ -586,6 +592,46 @@ export function processVoiceOrTextCommand(
   const normalized = normalizeSpeechText(text);
   const lower = normalized.toLowerCase();
   const summary = computeFinancialSummary(state);
+
+  const businessQuery = answerBusinessQuery(text, state, {
+    activeProductId: options?.activeQueryProductId,
+    languageCode: detected.code,
+  });
+  if (businessQuery) {
+    const queryIntent =
+      businessQuery.intent === 'LOW_STOCK' || businessQuery.intent === 'OUT_OF_STOCK'
+        ? 'RESTOCK_ADVICE'
+        : businessQuery.intent === 'CUSTOMER_OUTSTANDING'
+        ? 'QUERY_RECEIVABLES'
+        : businessQuery.intent === 'INVENTORY_VALUE' ||
+          businessQuery.intent === 'INVENTORY_OVERVIEW' ||
+          businessQuery.intent === 'PRODUCT_COUNT'
+        ? 'QUERY_PROFIT_REPORT'
+        : 'QUERY_STOCK';
+    return {
+      proposalId,
+      intent: queryIntent,
+      routedAgents:
+        queryIntent === 'QUERY_STOCK'
+          ? ['Supervisor Agent', 'Inventory Agent', 'Voice Response Agent']
+          : ['Supervisor Agent', 'Reporting Agent', 'Voice Response Agent'],
+      confidence: 0.98,
+      detectedLanguage: detected.code,
+      languageName: detected.name,
+      dialectNote: detected.dialectNote,
+      codeSwitched: detected.codeSwitched,
+      originalTranscript: text,
+      source: 'VOICE',
+      productId: businessQuery.productId,
+      productName: businessQuery.products[0]?.name,
+      missingFields: [],
+      warnings: [],
+      readbackText: businessQuery.answer,
+      answerText: businessQuery.answer,
+      status: 'ANSWERED',
+      createdAt: new Date().toISOString(),
+    };
+  }
 
   // 1. Check Business Intelligence / Query Intents first
   if (/(restock|reorder|low stock|out of stock|mangwana|order karna|shortage|khatam|ரீஸ்டாக்|தீர்ந்து|कम है)/.test(lower)) {
