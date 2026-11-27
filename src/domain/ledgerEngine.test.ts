@@ -5,6 +5,7 @@ import {
   commitPurchase,
   commitSale,
   commitSaleReturn,
+  commitSupplierPayment,
   computeFinancialSummary,
   importBankTransactions,
 } from './ledgerEngine';
@@ -173,12 +174,12 @@ describe('ledgerEngine deterministic accounting & inventory', () => {
     expect(state.suppliers.some((s) => s.name === 'Dairy Wholesale Co')).toBe(true);
     expect(state.products.some((p) => p.name === 'Amul Butter 500g' && p.currentStock === 20)).toBe(true);
 
-    // Multi-item sale with an existing item + a brand-new unlisted item to a new customer
+    // Multi-item sale with existing items to a new customer
     const saleRes = commitSale(state, {
       customerName: 'Ravi Fruit Mart',
       items: [
         { productId: 'prod-rice', quantity: 5, unitPrice: 1200 },
-        { productName: 'Alphonso Mangoes', unit: 'crates', quantity: 10, unitPrice: 800 },
+        { productId: 'prod-ghee', quantity: 10, unitPrice: 640 },
       ],
       amountPaid: 10000,
       paymentMode: 'Card',
@@ -188,10 +189,9 @@ describe('ledgerEngine deterministic accounting & inventory', () => {
     if (!saleRes.ok) return;
     state = saleRes.state;
     expect(state.customers.some((c) => c.name === 'Ravi Fruit Mart')).toBe(true);
-    expect(state.products.some((p) => p.name === 'Alphonso Mangoes')).toBe(true);
     expect(state.sales[0].items.length).toBe(2);
-    expect(state.sales[0].netTotal).toBe(14000);
-    expect(state.sales[0].balanceDue).toBe(4000);
+    expect(state.sales[0].netTotal).toBe(12400);
+    expect(state.sales[0].balanceDue).toBe(2400);
 
     // Custom expense category
     const expRes = commitExpense(state, {
@@ -202,5 +202,29 @@ describe('ledgerEngine deterministic accounting & inventory', () => {
       source: 'DASHBOARD',
     });
     expect(expRes.ok).toBe(true);
+  });
+
+  it('blocks unregistered products and supplier payments when no payable balance exists', () => {
+    const initial = createInitialBusinessState();
+    const unknownSale = commitSale(initial, {
+      customerName: 'Ravi Fruit Mart',
+      productName: 'Alphonso Mangoes',
+      unit: 'crates',
+      quantity: 10,
+      unitPrice: 800,
+      amountPaid: 8000,
+      paymentMode: 'CASH',
+      source: 'DASHBOARD',
+    });
+    expect(unknownSale.ok).toBe(false);
+
+    const noPayable = commitSupplierPayment(
+      initial,
+      'sup-deccan',
+      100,
+      'CASH',
+      'TEST-REF'
+    );
+    expect(noPayable.ok).toBe(false);
   });
 });

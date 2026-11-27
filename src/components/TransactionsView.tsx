@@ -631,12 +631,7 @@ export function TransactionsView({
             {saleLines.map((line, idx) => (
               <div
                 key={idx}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '2fr 0.9fr 0.8fr 1fr auto',
-                  gap: '0.45rem',
-                  alignItems: 'end',
-                }}
+                className="tx-line-grid"
               >
                 <div className="field">
                   <label htmlFor={`sl-prod-${idx}`}>Product (Any)</label>
@@ -864,12 +859,7 @@ export function TransactionsView({
             {purLines.map((line, idx) => (
               <div
                 key={idx}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '2fr 0.9fr 0.8fr 1fr auto',
-                  gap: '0.45rem',
-                  alignItems: 'end',
-                }}
+                className="tx-line-grid"
               >
                 <div className="field">
                   <label htmlFor={`pl-prod-${idx}`}>Product (Any)</label>

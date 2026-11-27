@@ -118,23 +118,10 @@ export function commitSale(state: BusinessState, input: CommitSaleInput): Engine
       if (!cleanProdName) {
         return { ok: false, error: 'Selected product does not exist in inventory.' };
       }
-      // Auto-register unlisted product on the fly so shopkeeper is never blocked
-      const unitLabel = (line.unit ?? '').trim() || 'units';
-      const estCost = Math.round(line.unitPrice * 0.85);
-      product = {
-        id: nextId('prod'),
-        sku: `GEN-${101 + products.length}`,
-        name: cleanProdName,
-        category: 'General',
-        unit: unitLabel,
-        currentStock: line.quantity,
-        reorderLevel: 10,
-        maxStock: Math.max(50, line.quantity * 4),
-        avgCostPrice: estCost,
-        defaultSellPrice: Math.round(line.unitPrice),
-        aliases: [cleanProdName.toLowerCase()],
+      return {
+        ok: false,
+        error: `Product "${cleanProdName}" is not in inventory. Record a purchase or add the product before selling it.`,
       };
-      products = [...products, product];
     } else if (line.quantity > product.currentStock) {
       return {
         ok: false,
@@ -212,6 +199,21 @@ export function commitSale(state: BusinessState, input: CommitSaleInput): Engine
       }
     } else {
       customer = state.customers.find((c) => c.id === 'cust-walkin') ?? state.customers[0];
+    }
+  }
+
+  if (balanceDue > 0) {
+    const outstandingBefore = state.sales
+      .filter((s) => s.customerId === customer.id && s.status !== 'RETURNED')
+      .reduce((sum, s) => sum + s.balanceDue, 0);
+    if (customer.creditLimit > 0 && outstandingBefore + balanceDue > customer.creditLimit) {
+      return {
+        ok: false,
+        error: `Credit limit exceeded for ${customer.name}. Available credit: ₹${Math.max(
+          0,
+          customer.creditLimit - outstandingBefore
+        ).toLocaleString('en-IN')}.`,
+      };
     }
   }
 
@@ -315,6 +317,9 @@ export function commitSaleReturn(
 ): EngineResult {
   const sale = state.sales.find((s) => s.id === saleId);
   if (!sale) return { ok: false, error: 'Invoice not found.' };
+  if (sale.status === 'RETURNED') {
+    return { ok: false, error: 'This invoice is already fully returned.' };
+  }
 
   const item = sale.items.find((i) => i.productId === productId);
   if (!item) return { ok: false, error: 'Product not found in invoice.' };
@@ -344,11 +349,11 @@ export function commitSaleReturn(
       newAmountPaid = newNet;
     }
     const newBalanceDue = Math.max(0, newNet - newAmountPaid);
-    const allReturned = s.items.every(
-      (it) =>
-        (it.productId === productId ? (it.returnedQty ?? 0) + returnQty : it.returnedQty ?? 0) >=
-        it.quantity
-    );
+    const allReturned = s.items.every((it) => {
+      const returnedQtyForItem =
+        it.productId === productId ? (it.returnedQty ?? 0) + returnQty : it.returnedQty ?? 0;
+      return returnedQtyForItem >= it.quantity;
+    });
     return {
       ...s,
       netTotal: newNet,
@@ -838,6 +843,9 @@ export function commitSupplierPayment(
     .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
   const totalPayable = openPurchases.reduce((s, p) => s + p.balanceDue, 0);
+  if (totalPayable === 0) {
+    return { ok: false, error: `${supplier.name} has no pending supplier balance.` };
+  }
   if (amount > totalPayable) {
     return {
       ok: false,
@@ -1043,6 +1051,13 @@ export function addProduct(state: BusinessState, input: AddProductInput): Engine
   if (!input.name.trim()) return { ok: false, error: 'Product name is required.' };
   if (input.defaultSellPrice < 0 || input.avgCostPrice < 0 || input.currentStock < 0) {
     return { ok: false, error: 'Prices and stock cannot be negative.' };
+  }
+  if (state.products.some((p) => p.name.trim().toLowerCase() === input.name.trim().toLowerCase())) {
+    return { ok: false, error: `Product "${input.name.trim()}" already exists.` };
+  }
+  const cleanSku = input.sku.trim();
+  if (cleanSku && state.products.some((p) => p.sku.trim().toLowerCase() === cleanSku.toLowerCase())) {
+    return { ok: false, error: `SKU "${cleanSku}" already exists.` };
   }
   const id = nextId('prod');
   const syncState = getSyncState(state);
